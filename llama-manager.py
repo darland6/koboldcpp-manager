@@ -89,6 +89,8 @@ class LlamaManager:
         self.monitor_active = False
         self.monitor_failures = 0
         self.monitor_restarts = 0
+        self.error_lines = []
+        self.error_lines_lock = threading.Lock()
 
         # Queue for thread-safe UI updates
         self.ui_queue = queue.Queue()
@@ -505,13 +507,20 @@ class LlamaManager:
             self.current_model = model
             self.ui_update(self.log, f"Process started (PID: {self.server_process.pid})")
 
-            # Stream stderr in background so we can see errors
+            # Clear error log on new server start
+            with self.error_lines_lock:
+                self.error_lines.clear()
+
+            # Stream stdout/stderr in background
             def read_output(pipe, label):
                 try:
                     for line in iter(pipe.readline, b''):
                         text = line.decode('utf-8', errors='replace').rstrip()
                         if text:
                             self.ui_update(self.log, f"[{label}] {text}")
+                            if label == "err":
+                                with self.error_lines_lock:
+                                    self.error_lines.append(text)
                 except Exception as e:
                     self.ui_update(self.log, f"[{label}] reader error: {e}")
                 finally:
@@ -702,7 +711,8 @@ class LlamaManager:
             self.monitor_active = True
             self.monitor_failures = 0
             self.monitor_restarts = 0
-            self.log("Monitor ON - watching server health")
+            self._last_error_count = 0
+            self.log("Monitor ON - watching server health + stderr")
             self.ui_update(self.monitor_status_label.config,
                            text="MONITORING", bootstyle="warning")
             threading.Thread(target=self._monitor_loop, daemon=True).start()
@@ -711,35 +721,74 @@ class LlamaManager:
             self.log("Monitor OFF")
             self.ui_update(self.monitor_status_label.config, text="", bootstyle="secondary")
 
+    def _drain_new_errors(self):
+        """Return new stderr lines since last check"""
+        with self.error_lines_lock:
+            new_lines = self.error_lines[self._last_error_count:]
+            self._last_error_count = len(self.error_lines)
+            return new_lines
+
     def _monitor_loop(self):
-        """Background loop that polls server health and auto-restarts on failure"""
+        """Background loop that polls server health and stderr for errors"""
         while self.monitor_active:
             interval = int(self.monitor_interval_var.get())
             max_restarts_str = self.max_restarts_var.get()
             max_restarts = int(max_restarts_str) if max_restarts_str != "0" else float('inf')
 
-            if self._is_server_running():
-                # Server healthy
+            server_up = self._is_server_running()
+            new_errors = self._drain_new_errors()
+            error_count = len(new_errors)
+
+            if server_up and error_count == 0:
+                # All clear
                 if self.monitor_failures > 0:
-                    self.ui_update(self.log, f"[Monitor] Server recovered after {self.monitor_failures} failed check(s)")
+                    self.ui_update(self.log, f"[Monitor] Recovered after {self.monitor_failures} failure(s)")
                     self.monitor_failures = 0
+                with self.error_lines_lock:
+                    total_errs = len(self.error_lines)
                 self.ui_update(self.monitor_status_label.config,
-                               text=f"OK | restarts: {self.monitor_restarts}", bootstyle="success")
+                               text=f"OK | errs: {total_errs} | restarts: {self.monitor_restarts}",
+                               bootstyle="success")
+
+            elif server_up and error_count > 0:
+                # Server responding but stderr activity
+                with self.error_lines_lock:
+                    total_errs = len(self.error_lines)
+                self.ui_update(self.monitor_status_label.config,
+                               text=f"ERRORS +{error_count} ({total_errs} total) | restarts: {self.monitor_restarts}",
+                               bootstyle="warning")
+                self.ui_update(self.log,
+                    f"[Monitor] {error_count} new stderr line(s) detected this cycle ({total_errs} total)")
+                # Log the actual error lines
+                for line in new_errors[-5:]:  # Show last 5 new lines
+                    self.ui_update(self.log, f"[Monitor][err] {line[:200]}")
+                if error_count > 5:
+                    self.ui_update(self.log, f"[Monitor] ...and {error_count - 5} more")
+
             else:
+                # Server DOWN
                 self.monitor_failures += 1
+                with self.error_lines_lock:
+                    total_errs = len(self.error_lines)
                 self.ui_update(self.monitor_status_label.config,
-                               text=f"DOWN x{self.monitor_failures} | restarts: {self.monitor_restarts}",
+                               text=f"DOWN x{self.monitor_failures} | errs: {total_errs} | restarts: {self.monitor_restarts}",
                                bootstyle="danger")
 
-                if self.monitor_failures == 1:
+                if new_errors:
+                    self.ui_update(self.log,
+                        f"[Monitor] Server DOWN + {error_count} stderr line(s):")
+                    for line in new_errors[-5:]:
+                        self.ui_update(self.log, f"[Monitor][err] {line[:200]}")
+                elif self.monitor_failures == 1:
                     self.ui_update(self.log, "[Monitor] Server not responding, watching...")
-                elif self.monitor_failures >= 3:
-                    # 3 consecutive failures = confirmed down
+
+                if self.monitor_failures >= 3:
+                    # 3 consecutive health failures = confirmed down, try restart
                     if self.monitor_restarts >= max_restarts:
                         self.ui_update(self.log,
                             f"[Monitor] Max restarts ({int(max_restarts)}) reached. Stopping monitor.")
                         self.ui_update(self.monitor_status_label.config,
-                                       text=f"HALTED (max restarts)", bootstyle="danger")
+                                       text="HALTED (max restarts)", bootstyle="danger")
                         self.monitor_active = False
                         self.ui_update(self.monitor_var.set, False)
                         break
