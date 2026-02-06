@@ -1,0 +1,51 @@
+name: Build Release
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: KoboldCppManager-Windows.exe
+            pyinstaller_name: KoboldCppManager.exe
+          - os: macos-latest
+            artifact: KoboldCppManager-macOS-arm64
+            pyinstaller_name: KoboldCppManager
+          - os: ubuntu-latest
+            artifact: KoboldCppManager-Linux
+            pyinstaller_name: KoboldCppManager
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install ttkbootstrap pyinstaller
+
+      - name: Build executable
+        run: |
+          pyinstaller koboldcpp-manager.spec
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          mv "dist/${{ matrix.pyinstaller_name }}" "dist/${{ matrix.artifact }}"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.artifact }}
