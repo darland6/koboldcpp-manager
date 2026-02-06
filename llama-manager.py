@@ -728,6 +728,66 @@ class LlamaManager:
             self._last_error_count = len(self.error_lines)
             return new_lines
 
+    def _diagnose_errors(self, error_lines):
+        """Analyze stderr lines and return (diagnosis, remediation) tuple"""
+        combined = "\n".join(error_lines)
+
+        if "access violation" in combined.lower() or "unhandled exception" in combined.lower():
+            # Check for VRAM-competing processes
+            vram_hogs = self._find_vram_conflicts()
+            if vram_hogs:
+                return (
+                    f"CRASH: Access violation during model load. VRAM conflict with: {', '.join(vram_hogs)}",
+                    "kill_vram_conflicts"
+                )
+            return ("CRASH: Access violation during model load (possible VRAM exhaustion)", "restart")
+
+        if "out of memory" in combined.lower() or "cuda error" in combined.lower():
+            vram_hogs = self._find_vram_conflicts()
+            if vram_hogs:
+                return (
+                    f"CRASH: GPU memory error. VRAM conflict with: {', '.join(vram_hogs)}",
+                    "kill_vram_conflicts"
+                )
+            return ("CRASH: GPU out of memory", "restart")
+
+        if "failed to execute" in combined.lower():
+            return ("CRASH: KoboldCpp failed to execute", "restart")
+
+        return (f"{len(error_lines)} stderr line(s)", None)
+
+    def _find_vram_conflicts(self):
+        """Check for processes that compete for GPU VRAM"""
+        conflicts = []
+        for proc_name in ["ollama.exe", "ollama_llama_server.exe"]:
+            try:
+                result = subprocess.run(
+                    ["tasklist", "/FI", f"IMAGENAME eq {proc_name}"],
+                    capture_output=True, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                if proc_name.lower() in result.stdout.lower() and "no tasks" not in result.stdout.lower():
+                    conflicts.append(proc_name)
+            except Exception:
+                pass
+        return conflicts
+
+    def _kill_vram_conflicts(self):
+        """Kill processes competing for GPU VRAM"""
+        killed = []
+        for proc_name in ["ollama_llama_server.exe", "ollama.exe"]:
+            try:
+                result = subprocess.run(
+                    ["taskkill", "/F", "/IM", proc_name],
+                    capture_output=True, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                if "SUCCESS" in result.stdout:
+                    killed.append(proc_name)
+            except Exception:
+                pass
+        return killed
+
     def _monitor_loop(self):
         """Background loop that polls server health and stderr for errors"""
         while self.monitor_active:
@@ -751,16 +811,15 @@ class LlamaManager:
                                bootstyle="success")
 
             elif server_up and error_count > 0:
-                # Server responding but stderr activity
+                # Server responding but stderr activity - diagnose
+                diagnosis, remediation = self._diagnose_errors(new_errors)
                 with self.error_lines_lock:
                     total_errs = len(self.error_lines)
                 self.ui_update(self.monitor_status_label.config,
                                text=f"ERRORS +{error_count} ({total_errs} total) | restarts: {self.monitor_restarts}",
                                bootstyle="warning")
-                self.ui_update(self.log,
-                    f"[Monitor] {error_count} new stderr line(s) detected this cycle ({total_errs} total)")
-                # Log the actual error lines
-                for line in new_errors[-5:]:  # Show last 5 new lines
+                self.ui_update(self.log, f"[Monitor] {diagnosis}")
+                for line in new_errors[-5:]:
                     self.ui_update(self.log, f"[Monitor][err] {line[:200]}")
                 if error_count > 5:
                     self.ui_update(self.log, f"[Monitor] ...and {error_count - 5} more")
@@ -774,16 +833,17 @@ class LlamaManager:
                                text=f"DOWN x{self.monitor_failures} | errs: {total_errs} | restarts: {self.monitor_restarts}",
                                bootstyle="danger")
 
+                # Diagnose from stderr
+                diagnosis, remediation = self._diagnose_errors(new_errors) if new_errors else ("No response", None)
                 if new_errors:
-                    self.ui_update(self.log,
-                        f"[Monitor] Server DOWN + {error_count} stderr line(s):")
+                    self.ui_update(self.log, f"[Monitor] Server DOWN - {diagnosis}")
                     for line in new_errors[-5:]:
                         self.ui_update(self.log, f"[Monitor][err] {line[:200]}")
                 elif self.monitor_failures == 1:
                     self.ui_update(self.log, "[Monitor] Server not responding, watching...")
 
                 if self.monitor_failures >= 3:
-                    # 3 consecutive health failures = confirmed down, try restart
+                    # Confirmed down - attempt remediation and restart
                     if self.monitor_restarts >= max_restarts:
                         self.ui_update(self.log,
                             f"[Monitor] Max restarts ({int(max_restarts)}) reached. Stopping monitor.")
@@ -792,6 +852,14 @@ class LlamaManager:
                         self.monitor_active = False
                         self.ui_update(self.monitor_var.set, False)
                         break
+
+                    # Apply remediation before restart
+                    if remediation == "kill_vram_conflicts":
+                        killed = self._kill_vram_conflicts()
+                        if killed:
+                            self.ui_update(self.log,
+                                f"[Monitor] Killed VRAM conflicts: {', '.join(killed)}")
+                            time.sleep(2)  # Let GPU memory free up
 
                     model = self.model_var.get()
                     if model:
