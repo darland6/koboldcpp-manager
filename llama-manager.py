@@ -86,6 +86,9 @@ class LlamaManager:
         self.host = "127.0.0.1"
         self.port = 8080
         self.working = False
+        self.monitor_active = False
+        self.monitor_failures = 0
+        self.monitor_restarts = 0
 
         # Queue for thread-safe UI updates
         self.ui_queue = queue.Queue()
@@ -205,6 +208,40 @@ class LlamaManager:
         self.custom_split_var = tk.StringVar(value="0.4,0.6")
         self.custom_split_entry = ttk.Entry(gpu_frame, textvariable=self.custom_split_var, width=12)
         # Don't pack yet - will be shown when "Custom" is selected
+
+        # Monitor frame (third row)
+        monitor_frame = ttk.Frame(self.root)
+        monitor_frame.pack(fill="x", padx=20, pady=5)
+
+        self.monitor_var = tk.BooleanVar(value=False)
+        monitor_check = ttk.Checkbutton(
+            monitor_frame, text="Monitor & Auto-Restart",
+            variable=self.monitor_var, command=self.toggle_monitor,
+            bootstyle="warning-round-toggle"
+        )
+        monitor_check.pack(side=LEFT, padx=5)
+
+        self.monitor_status_label = ttk.Label(monitor_frame, text="", font=("Consolas", 9))
+        self.monitor_status_label.pack(side=LEFT, padx=(10, 0))
+
+        # Monitor interval
+        ttk.Label(monitor_frame, text="Interval:").pack(side=LEFT, padx=(20, 5))
+        self.monitor_interval_var = tk.StringVar(value="5")
+        interval_combo = ttk.Combobox(
+            monitor_frame, textvariable=self.monitor_interval_var,
+            values=["3", "5", "10", "15", "30", "60"], width=4, state="readonly"
+        )
+        interval_combo.pack(side=LEFT)
+        ttk.Label(monitor_frame, text="sec").pack(side=LEFT, padx=(2, 0))
+
+        # Max restart attempts
+        ttk.Label(monitor_frame, text="Max restarts:").pack(side=LEFT, padx=(20, 5))
+        self.max_restarts_var = tk.StringVar(value="3")
+        restarts_combo = ttk.Combobox(
+            monitor_frame, textvariable=self.max_restarts_var,
+            values=["1", "3", "5", "10", "0"], width=4, state="readonly"
+        )
+        restarts_combo.pack(side=LEFT)
 
         # Server info
         info_frame = ttk.Frame(self.root)
@@ -657,6 +694,67 @@ class LlamaManager:
         """Open download URL in browser"""
         self.log(f"Opening download: {url}")
         webbrowser.open(url)
+
+    # ── Monitor & Auto-Restart ──────────────────────────────────
+
+    def toggle_monitor(self):
+        if self.monitor_var.get():
+            self.monitor_active = True
+            self.monitor_failures = 0
+            self.monitor_restarts = 0
+            self.log("Monitor ON - watching server health")
+            self.ui_update(self.monitor_status_label.config,
+                           text="MONITORING", bootstyle="warning")
+            threading.Thread(target=self._monitor_loop, daemon=True).start()
+        else:
+            self.monitor_active = False
+            self.log("Monitor OFF")
+            self.ui_update(self.monitor_status_label.config, text="", bootstyle="secondary")
+
+    def _monitor_loop(self):
+        """Background loop that polls server health and auto-restarts on failure"""
+        while self.monitor_active:
+            interval = int(self.monitor_interval_var.get())
+            max_restarts_str = self.max_restarts_var.get()
+            max_restarts = int(max_restarts_str) if max_restarts_str != "0" else float('inf')
+
+            if self._is_server_running():
+                # Server healthy
+                if self.monitor_failures > 0:
+                    self.ui_update(self.log, f"[Monitor] Server recovered after {self.monitor_failures} failed check(s)")
+                    self.monitor_failures = 0
+                self.ui_update(self.monitor_status_label.config,
+                               text=f"OK | restarts: {self.monitor_restarts}", bootstyle="success")
+            else:
+                self.monitor_failures += 1
+                self.ui_update(self.monitor_status_label.config,
+                               text=f"DOWN x{self.monitor_failures} | restarts: {self.monitor_restarts}",
+                               bootstyle="danger")
+
+                if self.monitor_failures == 1:
+                    self.ui_update(self.log, "[Monitor] Server not responding, watching...")
+                elif self.monitor_failures >= 3:
+                    # 3 consecutive failures = confirmed down
+                    if self.monitor_restarts >= max_restarts:
+                        self.ui_update(self.log,
+                            f"[Monitor] Max restarts ({int(max_restarts)}) reached. Stopping monitor.")
+                        self.ui_update(self.monitor_status_label.config,
+                                       text=f"HALTED (max restarts)", bootstyle="danger")
+                        self.monitor_active = False
+                        self.ui_update(self.monitor_var.set, False)
+                        break
+
+                    model = self.model_var.get()
+                    if model:
+                        self.monitor_restarts += 1
+                        self.monitor_failures = 0
+                        self.ui_update(self.log,
+                            f"[Monitor] Auto-restart #{self.monitor_restarts}: {model}")
+                        self.start_server()
+                    else:
+                        self.ui_update(self.log, "[Monitor] No model selected, cannot restart")
+
+            time.sleep(interval)
 
 def main():
     # Available themes: darkly, superhero, solar, cyborg, vapor, cosmo, flatly, journal,
