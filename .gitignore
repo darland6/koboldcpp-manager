@@ -1,0 +1,40 @@
+# Models (large binary files)
+*.gguf
+
+# KoboldCpp binary
+*.exe
+
+# Build artifacts
+build/
+dist/
+__pycache__/
+
+# KoboldCpp logs and configs
+kobold_*.txt
+*.kcpps
+*.kcppt
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Claude Code project memory (but keep skills/)
+.claude/*
+!.claude/skills/
+
+# OS files
+Thumbs.db
+Desktop.ini
+
+# Project-specific Claude instructions (contains local paths)
+CLAUDE.md
+
+# Project-local files not for distribution
+*.bat
+*.png
+*.json
+test-gui.py
+TestGUI.spec
+LlamaManager.spec
+server.py
+proxy.py
