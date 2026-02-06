@@ -10,6 +10,7 @@ import time
 import webbrowser
 import urllib.request
 import json
+import socket
 
 class LlamaManager:
     # Popular GGUF models with download links (HuggingFace)
@@ -211,8 +212,15 @@ class LlamaManager:
 
         ttk.Label(info_frame, text="Connection Info:", font=("Segoe UI", 12, "bold")).pack(anchor=W)
 
-        self.endpoint_label = ttk.Label(info_frame, text="API Endpoint: Not running")
-        self.endpoint_label.pack(anchor="w", pady=2)
+        endpoint_row = ttk.Frame(info_frame)
+        endpoint_row.pack(anchor="w", fill="x", pady=2)
+        self.endpoint_label = ttk.Label(endpoint_row, text="API Endpoint: Not running")
+        self.endpoint_label.pack(side=LEFT)
+        self.copy_btn = ttk.Button(endpoint_row, text="Copy", bootstyle="info-outline", command=self.copy_endpoint, padding=(5, 1))
+        # Hidden until server starts
+
+        self.lan_endpoint_label = ttk.Label(info_frame, text="")
+        self.lan_endpoint_label.pack(anchor="w", pady=2)
 
         self.model_label = ttk.Label(info_frame, text="Loaded Model: None")
         self.model_label.pack(anchor="w", pady=2)
@@ -556,18 +564,45 @@ class LlamaManager:
         port = self.port_var.get()
         self.ui_update(self._update_status, running, host, port)
 
+    def _get_local_ip(self):
+        """Get the machine's LAN IP address"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "unknown"
+
+    def copy_endpoint(self):
+        """Copy the API endpoint URL to clipboard"""
+        text = self.endpoint_label.cget("text")
+        url = text.replace("API Endpoint: ", "")
+        self.root.clipboard_clear()
+        self.root.clipboard_append(url)
+        self.log(f"Copied to clipboard: {url}")
+
     def _update_status(self, running, host, port):
         if running:
             self.status_label.config(text="● Server: Running", bootstyle="success")
             self.start_btn.config(state=DISABLED)
             self.stop_btn.config(state=NORMAL)
-            self.endpoint_label.config(text=f"API Endpoint: http://{host}:{port}/v1/")
+            endpoint = f"http://{host}:{port}/v1/"
+            self.endpoint_label.config(text=f"API Endpoint: {endpoint}")
+            self.copy_btn.pack(side=LEFT, padx=(10, 0))
+            # Show LAN address when server is running
+            local_ip = self._get_local_ip()
+            lan_url = f"http://{local_ip}:{port}/v1/"
+            self.lan_endpoint_label.config(text=f"LAN Address:    {lan_url}")
             self.model_label.config(text=f"Loaded Model: {self.current_model or 'External'}")
         else:
             self.status_label.config(text="● Server: Stopped", bootstyle="danger")
             self.start_btn.config(state=NORMAL)
             self.stop_btn.config(state=DISABLED)
             self.endpoint_label.config(text="API Endpoint: Not running")
+            self.copy_btn.pack_forget()
+            self.lan_endpoint_label.config(text="")
             self.model_label.config(text="Loaded Model: None")
 
     def check_available_models(self):
