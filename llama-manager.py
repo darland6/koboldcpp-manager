@@ -336,8 +336,14 @@ class LlamaManager:
 
     def toggle_lan(self):
         if self.lan_var.get():
+            if not messagebox.askyesno("Security Warning",
+                "Enabling LAN mode will expose your LLM server to all devices on your network.\n\n"
+                "KoboldCpp has NO authentication. Anyone on your network can send requests.\n\n"
+                "Continue?"):
+                self.lan_var.set(False)
+                return
             self.host = "0.0.0.0"
-            self.log("LAN access enabled")
+            self.log("WARNING: LAN access enabled - server exposed to network (no auth)")
         else:
             self.host = "127.0.0.1"
             self.log("LAN access disabled")
@@ -398,7 +404,21 @@ class LlamaManager:
             return
 
         port = self.port_var.get()
+        try:
+            port_int = int(port)
+            if not (1 <= port_int <= 65535):
+                raise ValueError
+        except ValueError:
+            self.ui_update(messagebox.showerror, "Error", "Port must be a number between 1 and 65535")
+            return
+
         gpu_layers = self.gpu_var.get()
+        try:
+            int(gpu_layers)
+        except ValueError:
+            self.ui_update(messagebox.showerror, "Error", "GPU layers must be a number")
+            return
+
         host = "0.0.0.0" if self.lan_var.get() else "127.0.0.1"
         context_len = self.context_var.get()
         use_cuda = self.cuda_var.get()
@@ -475,12 +495,22 @@ class LlamaManager:
             self.ui_update(self.log, f"Error: {e}")
 
     def stop_server(self):
-        self.ui_update(self.log, "Stopping all LLM server processes...")
+        self.ui_update(self.log, "Stopping LLM server...")
 
-        # Kill all llama and kobold related processes
+        # Try graceful shutdown by PID first
+        if self.server_process and self.server_process.poll() is None:
+            try:
+                self.server_process.terminate()
+                self.server_process.wait(timeout=5)
+                self.ui_update(self.log, f"Server process (PID {self.server_process.pid}) terminated")
+            except subprocess.TimeoutExpired:
+                self.server_process.kill()
+                self.ui_update(self.log, f"Server process (PID {self.server_process.pid}) killed")
+            except Exception as e:
+                self.ui_update(self.log, f"Error terminating process: {e}")
+
+        # Fallback: kill any remaining kobold processes by name
         processes_to_kill = [
-            "llama-server.exe",
-            "llama-cli.exe",
             "koboldcpp.exe",
             "koboldcpp_nocuda.exe",
             "koboldcpp_cu12.exe",
