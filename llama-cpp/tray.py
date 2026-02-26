@@ -181,7 +181,6 @@ def watch_shutdown_event():
 
 
 def setup(icon):
-    icon.visible = True
     if is_server_running():
         icon.icon = create_icon(True)
 
