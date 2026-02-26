@@ -39,4 +39,4 @@ echo ""
     --cache-type-v q8_0 \
     --flash-attn on \
     -np 1 \
-    --ctx-size 8192
+    --ctx-size 100000
